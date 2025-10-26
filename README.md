@@ -20,7 +20,7 @@ Surgi-Sync is a comprehensive AI-driven hospital assistant designed to streamlin
 
 ### 1. Emergency Room Assistant
 
-* Enables nurses to manage multiple patient admissions vocally.
+* Enables nurses to manage multiple patient admissions vocally using an **agentic workflow**, where the system interprets instructions and autonomously executes the required actions.
 * Sample command: `"Patient with ID 101 needs to be admitted with heavy nose bleeding"`
 * Supports operations:
 
@@ -29,7 +29,10 @@ Surgi-Sync is a comprehensive AI-driven hospital assistant designed to streamlin
   * `transfer patient`
   * `query patient or room status`
 * Voice input is processed via **Boson AI Higgs Audio V2 Model** for real-time transcription and audio feedback.
+* The agentic workflow ensures that instructions are dynamically interpreted, checked against current patient/room data, and executed with minimal manual intervention.
 * Information can be displayed live on the interface for quick reference.
+
+![Emergency Room Agent Setup](./media/output.png)
 
 ### 2. Surgery Room Recorder
 
@@ -55,8 +58,6 @@ Surgi-Sync is a comprehensive AI-driven hospital assistant designed to streamlin
 ## Requirements
 
 * Python 3.10+
-* SQLite (or compatible database)
-* Dependencies (install via pip):
 
 ```bash
 pip install -r requirements.txt
@@ -71,7 +72,7 @@ pip install -r requirements.txt
 1. **Clone the repository**
 
 ```bash
-git clone https://github.com/your-repo/surgi-sync.git
+git clone https://github.com/SurgiSync/SurgiSync.git
 cd surgi-sync
 ```
 
@@ -81,39 +82,22 @@ cd surgi-sync
 pip install -r requirements.txt
 ```
 
+
 3. **Configure environment variables**
-   Create a `.env` file with:
-
-```env
-BOSON_API_KEY=your_boson_api_key_here
-DATABASE_URL=sqlite:///surgisync.db
-```
-
-4. **Initialize the database**
-
 ```bash
-python scripts/init_db.py
+
+In the Streamlit secrets file, input the BOSON_API_KEY and GROQ_API_KEY
 ```
+
 
 5. **Run the modules**
 
 * **Emergency Room Assistant:**
 
 ```bash
-python modules/emergency_room.py
+streamlit run Patient_Query_&_Status.py
 ```
 
-* **Surgery Room Recorder:**
-
-```bash
-python modules/surgery_room.py
-```
-
-* **Doctor Room Assistant:**
-
-```bash
-python modules/doctor_room.py
-```
 
 6. **Using the system**
 
@@ -126,6 +110,5 @@ python modules/doctor_room.py
 
 * Ensure **microphone access** is enabled for voice modules.
 * The system relies on Boson AI for transcription and audio responses. Ensure the API key is valid.
-* All patient data is stored in the SQLite database for offline and persistent access.
 * Multi-language output requires configuring the desired language in the doctor or ER module.
 
