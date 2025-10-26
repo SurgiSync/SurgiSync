@@ -1,0 +1,86 @@
+[
+  {
+    "id": 1,
+    "room_name": "A",
+    "bed_number": 1,
+    "occupied": "yes",
+    "pid": 101
+  },
+  {
+    "id": 2,
+    "room_name": "A",
+    "bed_number": 2,
+    "occupied": "yes",
+    "pid": 102
+  },
+  {
+    "id": 3,
+    "room_name": "B",
+    "bed_number": 1,
+    "occupied": "no",
+    "pid": null
+  },
+  {
+    "id": 4,
+    "room_name": "B",
+    "bed_number": 2,
+    "occupied": "no",
+    "pid": null
+  },
+  {
+    "id": 5,
+    "room_name": "C",
+    "bed_number": 1,
+    "occupied": "no",
+    "pid": null
+  },
+  {
+    "id": 6,
+    "room_name": "C",
+    "bed_number": 2,
+    "occupied": "no",
+    "pid": null
+  },
+  {
+    "id": 7,
+    "room_name": "D",
+    "bed_number": 1,
+    "occupied": "no",
+    "pid": null
+  },
+  {
+    "id": 8,
+    "room_name": "D",
+    "bed_number": 2,
+    "occupied": "no",
+    "pid": null
+  },
+  {
+    "id": 9,
+    "room_name": "E",
+    "bed_number": 1,
+    "occupied": "no",
+    "pid": null
+  },
+  {
+    "id": 10,
+    "room_name": "E",
+    "bed_number": 2,
+    "occupied": "no",
+    "pid": null
+  },
+  {
+    "id": 11,
+    "room_name": "F",
+    "bed_number": 1,
+    "occupied": "yes",
+    "pid": 103
+  },
+  {
+    "id": 12,
+    "room_name": "F",
+    "bed_number": 2,
+    "occupied": "no",
+    "pid": null
+  }
+]

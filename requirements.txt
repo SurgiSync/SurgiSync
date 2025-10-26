@@ -1,0 +1,8 @@
+streamlit
+openai
+audio-recorder-streamlit
+langchain-groq
+langchain_core
+pydantic
+pandas
+python-dotenv
