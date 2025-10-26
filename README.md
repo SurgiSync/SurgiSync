@@ -129,12 +129,3 @@ python modules/doctor_room.py
 * All patient data is stored in the SQLite database for offline and persistent access.
 * Multi-language output requires configuring the desired language in the doctor or ER module.
 
----
-
-This README is designed to be **dense and fully self-contained**, serving as both a user guide and developer reference.
-
----
-
-If you want, I can also **make a super compact “one-page” README** with inline instructions and visual placeholders for immediate use in GitHub that looks very polished and modern. It would be even denser than this.
-
-Do you want me to do that next?
