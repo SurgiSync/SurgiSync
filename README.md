@@ -1,6 +1,6 @@
 # Surgi-Sync
 
-**AI that connects voices, data, and care inside and outside the OR**
+**Multilingual AI that connects voices, data, and care inside and outside the OR**
 
 Surgi-Sync is a comprehensive AI-driven hospital assistant designed to streamline patient management, surgery documentation, and doctor consultation. Leveraging **Boson AI Higgs Audio V2 model** for voice transcription and feedback, Surgi-Sync integrates multiple hospital workflows into a single intelligent platform.
 
@@ -8,7 +8,7 @@ Surgi-Sync is a comprehensive AI-driven hospital assistant designed to streamlin
 
 ## Features
 
-* **Voice-activated patient management:** Admit, discharge, and transfer patients in real-time using natural speech.
+* **Voice-activated patient management:** Admit, discharge, and transfer patients in real-time using natural speech and get hospital beds status.
 * **Surgical transcription:** Record and timestamp surgery conversations for accurate documentation and future reference.
 * **Doctor AI assistant:** Query patient status, generate surgery reports, and review transcripts.
 * **Multilingual support:** Responses and outputs can be generated in multiple languages supported by Boson AI.
@@ -53,6 +53,13 @@ Surgi-Sync is a comprehensive AI-driven hospital assistant designed to streamlin
 ![Surgi-Sync Architecture](./media/BosonAIDIagram.png)
 *The architecture visualizes the three modules, voice/audio flow, data storage, and AI processing pipelines.*
 
+LLM as a Reasoning Engine: We are using the Groq LLM (llama-3.3-70b-versatile) not just for simple generation, but as the core "brain" to understand requests and make decisions.
+
+Intent Classification & Routing: The system first uses the LLM to classify the user's intent (admit, discharge, query, etc.). This classification acts as a decision to route the request to the appropriate specialized function (your "tools").
+
+Tool Use: The functions like admit_patient_tool, discharge_patient_tool, record_surgery_comment_tool, and answer_general_query_tool serve as tools that the agent calls upon to interact with the external world (your JSON files and SQLite database) and perform specific actions. Some tools even use the LLM again for sub-tasks like data extraction.
+
+Retrieval-Augmented Generation (RAG): The answer_general_query_tool is a classic example of a RAG agent. It retrieves information from external knowledge sources (databases, json files) and uses the LLM to generate an informed answer based on that retrieved context.
 ---
 
 ## Requirements
