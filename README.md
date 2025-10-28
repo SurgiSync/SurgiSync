@@ -60,6 +60,7 @@ Intent Classification & Routing: The system first uses the LLM to classify the u
 Tool Use: The functions like admit_patient_tool, discharge_patient_tool, record_surgery_comment_tool, and answer_general_query_tool serve as tools that the agent calls upon to interact with the external world (your JSON files and SQLite database) and perform specific actions. Some tools even use the LLM again for sub-tasks like data extraction.
 
 Retrieval-Augmented Generation (RAG): The answer_general_query_tool is a classic example of a RAG agent. It retrieves information from external knowledge sources (databases, json files) and uses the LLM to generate an informed answer based on that retrieved context.
+
 ---
 
 ## Requirements
