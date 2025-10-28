@@ -1,7 +1,6 @@
 import streamlit as st
-import pandas as pd # Needed for styling
+import pandas as pd
 from datetime import datetime
-# Import necessary functions from utils
 from utils import (
     init_json_dbs,
     init_surgery_db,
@@ -9,19 +8,15 @@ from utils import (
     draw_chat_history,
     draw_sidebar,
     handle_audio_processing,
-    run_management_agent, # Use the management-specific agent
-    check_autoplay        # Import autoplay handler
+    run_management_agent      # Import the specific agent for this page
 )
 
-# --- Page Config & Title ---
-st.set_page_config(
-    page_title="IPD/OPD - (Nurse/Admin)",
-    layout="wide",
-    page_icon="🏥"
-)
-check_autoplay() # <-- Call autoplay handler
+st.set_page_config(page_title="🏥 IPD/OPD - (Nurse/Admin)", layout="wide", page_icon="🏥")
 
-# --- Initialize Databases & Session State ---
+# --- WIDER SIDEBAR ---
+st.markdown("""<style>[data-testid="stSidebar"] {width: 400px !important;}</style>""", unsafe_allow_html=True)
+
+# --- 1. Initialize Databases & Session State ---
 init_json_dbs()
 init_surgery_db()
 
@@ -30,31 +25,43 @@ st.caption("Use this page to admit, discharge, transfer, or get the status of pa
 
 # --- 2. Draw Dashboard ---
 with st.expander("Show/Hide Live Room Status"):
-    # 1. Get the raw data
     room_df = get_room_status_dashboard()
-    # 2. Define the styling function
+    
     def highlight_occupied(val):
-        # Check explicitly for 'yes', handle None or other values as green
         color = 'red' if val == 'yes' else 'green'
         return f'color: {color}'
-    # 3. Apply the style and display
+    
     if not room_df.empty:
-        # Apply styling using map on the specific column
-        st.dataframe(
-            room_df.style.map(highlight_occupied, subset=['occupied']),
-            use_container_width=True,
-            hide_index=True # Hide the default index column
-        )
+        if 'occupied' in room_df.columns:
+            st.dataframe(
+                room_df.style.apply(lambda col: col.map(highlight_occupied) if col.name == 'occupied' else [''] * len(col), axis=0),
+                use_container_width=True,
+                hide_index=True 
+            )
+        else:
+             st.dataframe(room_df, use_container_width=True, hide_index=True)
     else:
         st.write("No room data to display.")
 
 
 # --- 3. Draw UI Components ---
 page_key = "management_page" # Unique key for this page
-audio_bytes, selected_lang_code = draw_sidebar(page_key=page_key)
-draw_chat_history(page_key=page_key) # Draws the chat history specific to this page
 
-# --- 4. Run Core Logic ---
-if audio_bytes:
-    # Pass the 'run_management_agent' function to the handler
+# --- FIX: ADD STATE TO TRACK AUDIO (FOR LOOP PREVENTION) ---
+if f'last_processed_audio_{page_key}' not in st.session_state:
+    st.session_state[f'last_processed_audio_{page_key}'] = None
+
+audio_bytes, selected_lang_code = draw_sidebar(page_key=page_key)
+draw_chat_history(page_key=page_key) # Draw chat *before* processing
+
+# --- 4. Run Core Logic (WITH NEW CHECK) ---
+if audio_bytes and (st.session_state[f'last_processed_audio_{page_key}'] != audio_bytes):
+    
+    # 1. Store the new audio bytes to prevent reprocessing
+    st.session_state[f'last_processed_audio_{page_key}'] = audio_bytes
+    
+    # 2. Process the audio
     handle_audio_processing(run_management_agent, audio_bytes, selected_lang_code, page_key=page_key)
+    
+    # 3. Rerun the page to display the new chat messages
+    st.rerun()

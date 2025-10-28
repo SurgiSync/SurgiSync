@@ -11,7 +11,7 @@ from io import BytesIO
 from openai import OpenAI  # For Boson AI
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ValidationError
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -28,12 +28,21 @@ GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY"))
 # Ensure keys are loaded before initializing clients
 if not BOSON_API_KEY or not GROQ_API_KEY:
     st.error("API keys (BOSON_API_KEY, GROQ_API_KEY) not found. Please set them in .streamlit/secrets.toml")
-    # Provide dummy clients if partial functionality is desired
     boson_client = None
     groq_llm = None
 else:
-    boson_client = OpenAI(api_key=BOSON_API_KEY, base_url="https://hackathon.boson.ai/v1")
-    groq_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0)
+    try:
+        boson_client = OpenAI(api_key=BOSON_API_KEY, base_url="https://hackathon.boson.ai/v1")
+        groq_llm = ChatGroq(
+            groq_api_key=GROQ_API_KEY, # Pass the key here
+            model_name="llama-3.3-70b-versatile",
+            temperature=0.0
+        )
+    except Exception as e:
+        st.error(f"Failed to initialize API clients: {e}")
+        boson_client = None
+        groq_llm = None
+
 
 STT_MODEL_NAME = "higgs-audio-understanding-Hackathon"
 TTS_MODEL_NAME = "higgs-audio-generation-Hackathon"
@@ -77,7 +86,6 @@ def init_surgery_db():
             comment TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )""")
-        # Check if column exists before trying to add it
         c.execute("PRAGMA table_info(surgery_comments)")
         columns = [info[1] for info in c.fetchall()]
         if 'timestamp' not in columns:
@@ -96,7 +104,6 @@ def get_room_status_dashboard():
     """Reads JSON and returns a raw Pandas DataFrame for the room dashboard."""
     try:
         if not Path(ROOMS_FILE).exists():
-            st.warning(f"{ROOMS_FILE} not found.")
             return pd.DataFrame(columns=['id', 'room_name', 'bed_number', 'occupied', 'pid'])
         df = pd.read_json(ROOMS_FILE)
         if df.empty:
@@ -112,7 +119,6 @@ def get_patient_dashboard():
     """Reads patient JSON and returns a raw Pandas DataFrame."""
     try:
         if not Path(PATIENTS_FILE).exists():
-            st.warning(f"{PATIENTS_FILE} not found.")
             return pd.DataFrame(columns=['pid', 'first_name', 'last_name', 'room_name', 'bed_number', 'description', 'time_of_admit', 'dob'])
         df = pd.read_json(PATIENTS_FILE)
         if not df.empty:
@@ -132,18 +138,18 @@ def get_recent_surgery_notes():
     """Reads SQL DB and returns a DataFrame of the last 5 notes."""
     try:
         if not Path(SURGERY_DB_FILE).exists():
-            st.warning(f"{SURGERY_DB_FILE} not found.")
             return pd.DataFrame(columns=['timestamp', 'patientid', 'doctor', 'comment'])
         conn = sqlite3.connect(SURGERY_DB_FILE)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='surgery_comments'")
         if cursor.fetchone() is None:
             conn.close()
-            st.warning("Surgery comments table does not exist yet.")
             return pd.DataFrame(columns=['timestamp', 'patientid', 'doctor', 'comment'])
 
         df = pd.read_sql_query("SELECT timestamp, patientid, doctor, comment FROM surgery_comments ORDER BY timestamp DESC LIMIT 5", conn)
         conn.close()
+        if not df.empty and 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce').dt.strftime('%Y-%m-%d %H:%M')
         return df
     except Exception as e:
         st.error(f"Could not load recent notes: {e}")
@@ -152,12 +158,13 @@ def get_recent_surgery_notes():
 # ---
 # 3. BOSON AI API FUNCTIONS (STT & TTS)
 # ---
-# (Keep call_higgs_stt, call_higgs_tts, call_higgs_playback, b64_encode_bytes as they were)
 def b64_encode_bytes(audio_bytes):
     return base64.b64encode(audio_bytes).decode('utf-8')
 
 def call_higgs_stt(audio_bytes, lang_code):
-    if not boson_client: return None
+    if not boson_client:
+        st.error("Boson client not initialized. Check API Key.")
+        return None
     st.info("Sending audio to Higgs-STT...")
     try:
         audio_b64 = b64_encode_bytes(audio_bytes)
@@ -177,8 +184,17 @@ def call_higgs_stt(audio_bytes, lang_code):
         return None
 
 def call_higgs_tts(text_with_emotion, lang_code):
-    if not boson_client: return None
-    st.info("Sending text to Higgs-TTS for audio generation...")
+    """
+    Tries to generate audio.
+    On success, returns the audio bytes.
+    On failure, returns an error string: "TTS_ERROR: ..."
+    """
+    if not boson_client:
+        st.error("Boson client not initialized. Check API Key.")
+        return "TTS_ERROR: Boson client is None. Check API Key loading." # Return error string
+    
+    st.info(f"Sending to TTS: '{text_with_emotion}'") 
+
     try:
         system = f"You are an AI assistant designed to convert text into speech in language code '{lang_code}'. Respond with the appropriate emotion as tagged in the text. If no tag is present, use a calm, professional tone."
         response = boson_client.chat.completions.create(
@@ -191,14 +207,33 @@ def call_higgs_tts(text_with_emotion, lang_code):
             temperature=1.0, top_p=0.95, stream=False, timeout=300.0
         )
         audio_b64 = response.choices[0].message.audio.data
+        
+        if not audio_b64:
+             # Handle case where API returns success but empty audio
+             st.warning("TTS API returned success but with empty audio data.")
+             return "TTS_ERROR: API returned empty audio data." # Return error string
+
         st.success("Audio generated.")
         return base64.b64decode(audio_b64)
+    
     except Exception as e:
+        # This will print the FULL, DETAILED error to your terminal
+        print("\n" + "="*20 + " TTS API ERROR " + "="*20)
+        print(f"MODEL: {TTS_MODEL_NAME}")
+        print(f"INPUT TEXT: {text_with_emotion}")
+        print(f"ERROR DETAILS: {e}")
+        print("="*55 + "\n")
+        
+        # This will show the error in the Streamlit app UI
         st.error(f"TTS Error: {e}")
-        return None
+        
+        return f"TTS_ERROR: {e}" # Return error string
 
 def call_higgs_playback(transcript_text):
-    if not boson_client: return None
+    """HIGHLIGHT: Uses Higgs for multi-speaker dialogue."""
+    if not boson_client:
+        st.error("Boson client not initialized. Check API Key.")
+        return None
     st.info("Generating multi-speaker surgery playback...")
     try:
         system = (
@@ -221,18 +256,22 @@ def call_higgs_playback(transcript_text):
     except Exception as e:
         st.error(f"TTS Playback Error: {e}")
         return None
+
 # ---
 # 4. DATABASE HELPER FUNCTIONS (READERS)
 # ---
-# (Keep get_context_from_dbs and find_patient_id as they were)
 def get_context_from_dbs(patient_id):
+    """Retrieves all information for a patient from all three data sources."""
     context = {}
-    if patient_id is None: return json.dumps({"error": "No patient ID provided or found."})
+    if patient_id is None:
+        return json.dumps({"error": "No patient ID provided or found."})
     try:
         pid_int = int(patient_id)
         pid_str = str(patient_id)
-    except ValueError: return json.dumps({"error": f"Invalid patient ID format: {patient_id}"})
+    except ValueError:
+        return json.dumps({"error": f"Invalid patient ID format: {patient_id}"})
 
+    # Query JSON files
     try:
         if Path(PATIENTS_FILE).exists():
             with open(PATIENTS_FILE, 'r') as f: patients_db = json.load(f)
@@ -249,30 +288,31 @@ def get_context_from_dbs(patient_id):
         else: context['room_info'] = f"{ROOMS_FILE} not found."
     except Exception as e: context['room_info'] = f"Error reading rooms.json: {e}"
 
+    # Query SQL DB
     try:
         if Path(SURGERY_DB_FILE).exists():
             conn = sqlite3.connect(SURGERY_DB_FILE)
-            query = "SELECT doctor, comment, timestamp FROM surgery_comments WHERE patientid = ? ORDER BY timestamp DESC"
-            df = pd.read_sql_query(query, conn, params=(pid_str,))
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='surgery_comments'")
+            if cursor.fetchone() is None:
+                 context['surgery_comments'] = "Surgery comments table does not exist."
+            else:
+                query = "SELECT doctor, comment, timestamp FROM surgery_comments WHERE patientid = ? ORDER BY timestamp DESC"
+                df = pd.read_sql_query(query, conn, params=(pid_str,))
+                context['surgery_comments'] = df.to_dict('records') if not df.empty else "No surgery comments found."
             conn.close()
-            context['surgery_comments'] = df.to_dict('records') if not df.empty else "No surgery comments found."
         else: context['surgery_comments'] = f"{SURGERY_DB_FILE} not found."
-    except Exception as e: context['surgery_comments'] = f"Error accessing surgery database: {e}"
+    except Exception as e:
+        context['surgery_comments'] = f"Error accessing surgery database: {e}"
 
     return json.dumps(context, indent=2)
 
-def find_patient_id(text):
-    match = re.search(r'\b(?:patient|id)\s*(\d+)\b', text, re.IGNORECASE)
-    if match: return match.group(1)
-    match = re.search(r'\b(\d{3,})\b', text)
-    if match: return match.group(1)
-    return None
 
 # ---
 # 5. GROQ LLM "TOOL" FUNCTIONS (THE "LOGIC")
 # ---
 class PatientIDInfo(BaseModel):
-    pid: int = Field(..., description="The patient's unique ID as an integer")
+    pid: int | None = Field(None, description="The patient's unique ID as an integer, or null if not found")
 
 class AdmitInfo(BaseModel):
     pid: int = Field(..., description="The patient's unique ID")
@@ -283,7 +323,6 @@ class CommentInfo(BaseModel):
     doctor: str = Field(..., description="The name of the doctor, e.g., 'Dr. Aris'")
     comment: str = Field(..., description="The full surgery comment, excluding the metadata")
 
-# --- NEW Pydantic model for Transfer ---
 class TransferInfo(BaseModel):
     pid: int = Field(..., description="The patient's unique ID as an integer")
     new_room_name: str = Field(..., description="The target room letter (A-F)")
@@ -293,29 +332,44 @@ class TransferInfo(BaseModel):
     def validate_room(cls, v):
         if v.upper() not in ["A", "B", "C", "D", "E", "F"]:
             raise ValueError('Room name must be A, B, C, D, E, or F')
-        return v.upper() # Ensure uppercase
+        return v.upper()
 
     @field_validator('new_bed_num')
     def validate_bed(cls, v):
         if v not in [1, 2]:
             raise ValueError('Bed number must be 1 or 2')
         return v
-# --- END NEW Pydantic model ---
+
+def _safe_llm_extract(llm_with_structure, prompt, model_class):
+    """Helper to run LLM extraction and handle potential errors."""
+    if not groq_llm:
+        raise ConnectionError("LLM client not initialized.")
+    try:
+        info = llm_with_structure.invoke(prompt)
+        return info
+    except ValidationError as e:
+        st.error(f"LLM Data Extraction Validation Error ({model_class.__name__}): {e}")
+        raise ValueError(f"LLM failed to extract valid data matching {model_class.__name__}.") from e
+    except Exception as e:
+        st.error(f"LLM Data Extraction API Error ({model_class.__name__}): {e}")
+        raise ConnectionError(f"LLM API call failed during data extraction.") from e
 
 def admit_patient_tool(note: str):
-    if not groq_llm: return "[emotion: anxious] LLM client not initialized.", None
     st.info("Running: Admit Patient Tool")
     try:
         structured_llm = groq_llm.with_structured_output(AdmitInfo)
         prompt = f"Extract the patient ID (as integer) and description (as string) from this note: \"{note}\""
-        info = structured_llm.invoke(prompt)
+        info = _safe_llm_extract(structured_llm, prompt, AdmitInfo)
         pid = info.pid; desc = info.description
 
         rooms = []; patients = []
-        if Path(ROOMS_FILE).exists():
-             with open(ROOMS_FILE, 'r') as f: rooms = json.load(f)
-        if Path(PATIENTS_FILE).exists():
-             with open(PATIENTS_FILE, 'r') as f: patients = json.load(f)
+        try:
+             if Path(ROOMS_FILE).exists():
+                  with open(ROOMS_FILE, 'r') as f: rooms = json.load(f)
+             if Path(PATIENTS_FILE).exists():
+                  with open(PATIENTS_FILE, 'r') as f: patients = json.load(f)
+        except Exception as e:
+             raise IOError(f"Error reading data files: {e}")
 
         if any(p.get("pid") == pid for p in patients):
             return f"[emotion: anxious] Error: Patient {pid} is already admitted.", None
@@ -330,35 +384,44 @@ def admit_patient_tool(note: str):
         patients.append({
             "pid": pid, "time_of_admit": datetime.now().isoformat(),
             "room_name": room_name, "bed_number": bed_num, "description": desc,
-            "first_name": "Unknown", "last_name": "Unknown", "dob": "Unknown"
+            "first_name": "Unknown", "last_name": "Unknown", "dob": "Unknown" # Placeholders
         })
 
-        with open(ROOMS_FILE, 'w') as f: json.dump(rooms, f, indent=2)
-        with open(PATIENTS_FILE, 'w') as f: json.dump(patients, f, indent=2)
+        try:
+            with open(ROOMS_FILE, 'w') as f: json.dump(rooms, f, indent=2)
+            with open(PATIENTS_FILE, 'w') as f: json.dump(patients, f, indent=2)
+        except Exception as e:
+            raise IOError(f"Error saving updated data: {e}")
 
         return f"[emotion: calm] Success. Patient {pid} admitted to room {room_name}, bed {bed_num}.", None
-    except Exception as e:
+    except (IOError, ValueError, ConnectionError) as e:
         st.error(f"Admission Error details: {e}")
-        return f"[emotion: anxious] Admission Error: Could not process request. Details: {e}", None
+        return f"[emotion: anxious] Admission Error: {e}", None
+    except Exception as e:
+        st.error(f"Unexpected Admission Error: {e}", icon="🔥")
+        return f"[emotion: anxious] Unexpected error during admission.", None
+
 
 def discharge_patient_tool(text: str):
     """Discharges a patient using LLM to extract the ID."""
-    if not groq_llm: return "[emotion: anxious] LLM client not initialized.", None
     st.info("Running: Discharge Patient Tool")
     try:
         structured_llm = groq_llm.with_structured_output(PatientIDInfo)
         prompt = f"Extract the patient ID as an integer from this instruction: \"{text}\""
-        info = structured_llm.invoke(prompt)
+        info = _safe_llm_extract(structured_llm, prompt, PatientIDInfo)
         pid = info.pid
 
         if not pid:
              return "[emotion: anxious] Error: Could not reliably determine patient ID for discharge.", None
 
         rooms = []; patients = []
-        if Path(ROOMS_FILE).exists():
-             with open(ROOMS_FILE, 'r') as f: rooms = json.load(f)
-        if Path(PATIENTS_FILE).exists():
-             with open(PATIENTS_FILE, 'r') as f: patients = json.load(f)
+        try:
+             if Path(ROOMS_FILE).exists():
+                  with open(ROOMS_FILE, 'r') as f: rooms = json.load(f)
+             if Path(PATIENTS_FILE).exists():
+                  with open(PATIENTS_FILE, 'r') as f: patients = json.load(f)
+        except Exception as e:
+             raise IOError(f"Error reading data files: {e}")
 
         patient = next((p for p in patients if p.get("pid") == pid), None)
         if not patient: return f"[emotion: anxious] Error: Patient {pid} not found.", None
@@ -369,63 +432,66 @@ def discharge_patient_tool(text: str):
 
         patients = [p for p in patients if p.get("pid") != pid]
 
-        with open(ROOMS_FILE, 'w') as f: json.dump(rooms, f, indent=2)
-        with open(PATIENTS_FILE, 'w') as f: json.dump(patients, f, indent=2)
+        try:
+            with open(ROOMS_FILE, 'w') as f: json.dump(rooms, f, indent=2)
+            with open(PATIENTS_FILE, 'w') as f: json.dump(patients, f, indent=2)
+        except Exception as e:
+            raise IOError(f"Error saving updated data: {e}")
 
         return f"[emotion: calm] Success. Patient {pid} discharged.", None
-    except Exception as e:
+    except (IOError, ValueError, ConnectionError) as e:
         st.error(f"Discharge Error details: {e}")
-        return f"[emotion: anxious] Discharge Error: Could not process request. Details: {e}", None
+        return f"[emotion: anxious] Discharge Error: {e}", None
+    except Exception as e:
+        st.error(f"Unexpected Discharge Error: {e}", icon="🔥")
+        return f"[emotion: anxious] Unexpected error during discharge.", None
 
-# --- UPDATED transfer_patient_tool ---
 def transfer_patient_tool(text: str):
     """Transfers a patient using LLM to extract PID, Room, and Bed."""
-    if not groq_llm: return "[emotion: anxious] LLM client not initialized.", None
     st.info("Running: Transfer Patient Tool")
     try:
-        # Use LLM with structured output to extract all details
         structured_llm = groq_llm.with_structured_output(TransferInfo)
         prompt = f"""
         Extract the patient ID (integer), target room letter (A-F), and target bed number (1 or 2)
         from this transfer instruction: "{text}"
         Interpret room/bed combinations like 'Room C2' or 'Bed A1' correctly.
         """
-        transfer_details = structured_llm.invoke(prompt)
+        transfer_details = _safe_llm_extract(structured_llm, prompt, TransferInfo)
 
         pid = transfer_details.pid
-        new_room_name = transfer_details.new_room_name # Already validated A-F
-        new_bed_num = transfer_details.new_bed_num     # Already validated 1-2
+        new_room_name = transfer_details.new_room_name
+        new_bed_num = transfer_details.new_bed_num
 
-        if not pid: # Should be caught by Pydantic, but double check
+        if not pid: # Should be caught by Pydantic
             return "[emotion: anxious] Error: Could not reliably determine patient ID for transfer.", None
 
-        # --- Rest of the logic is the same ---
         rooms = []; patients = []
-        if Path(ROOMS_FILE).exists():
-             with open(ROOMS_FILE, 'r') as f: rooms = json.load(f)
-        if Path(PATIENTS_FILE).exists():
-             with open(PATIENTS_FILE, 'r') as f: patients = json.load(f)
+        try:
+            if Path(ROOMS_FILE).exists():
+                 with open(ROOMS_FILE, 'r') as f: rooms = json.load(f)
+            if Path(PATIENTS_FILE).exists():
+                 with open(PATIENTS_FILE, 'r') as f: patients = json.load(f)
+        except Exception as e:
+             raise IOError(f"Error reading data files: {e}")
 
         patient = next((p for p in patients if p.get("pid") == pid), None)
         if not patient:
             return f"[emotion: anxious] Error: Patient {pid} not found.", None
-        old_room_name = patient["room_name"]
-        old_bed_num = patient["bed_number"]
+        old_room_name = patient.get("room_name", "Unknown")
+        old_bed_num = patient.get("bed_number", "Unknown")
 
         if old_room_name == new_room_name and old_bed_num == new_bed_num:
              return f"[emotion: calm] Patient {pid} is already in Room {new_room_name} Bed {new_bed_num}.", None
 
         target_room = next((r for r in rooms if r.get("room_name") == new_room_name and r.get("bed_number") == new_bed_num), None)
         if not target_room:
-            # This check might be redundant due to Pydantic validation, but safe
-            return f"[emotion: anxious] Error: Target Room {new_room_name} Bed {new_bed_num} does not seem to exist in the system.", None
+            return f"[emotion: anxious] Error: Target Room {new_room_name} Bed {new_bed_num} does not seem to exist.", None
 
         if target_room.get("occupied") == "yes":
             return f"[emotion: anxious] Error: Target Room {new_room_name} Bed {new_bed_num} is already occupied by patient {target_room.get('pid')}.", None
 
         old_room = next((r for r in rooms if r.get("room_name") == old_room_name and r.get("bed_number") == old_bed_num), None)
 
-        # Perform the transfer
         patient["room_name"] = new_room_name
         patient["bed_number"] = new_bed_num
         target_room["occupied"] = "yes"
@@ -434,25 +500,26 @@ def transfer_patient_tool(text: str):
             old_room["occupied"] = "no"
             old_room["pid"] = None
 
-        with open(ROOMS_FILE, 'w') as f: json.dump(rooms, f, indent=2)
-        with open(PATIENTS_FILE, 'w') as f: json.dump(patients, f, indent=2)
+        try:
+            with open(ROOMS_FILE, 'w') as f: json.dump(rooms, f, indent=2)
+            with open(PATIENTS_FILE, 'w') as f: json.dump(patients, f, indent=2)
+        except Exception as e:
+             raise IOError(f"Error saving updated data: {e}")
 
         return f"[emotion: calm] Success. Patient {pid} transferred from {old_room_name}-{old_bed_num} to {new_room_name}-{new_bed_num}.", None
-
-    except Exception as e:
-        # Catch errors from LLM extraction (like invalid room/bed) or file operations
+    except (IOError, ValueError, ConnectionError) as e:
         st.error(f"Transfer Error details: {e}")
-        return f"[emotion: anxious] Transfer Error: Could not process request. {e}", None
-# --- END UPDATED transfer_patient_tool ---
-
+        return f"[emotion: anxious] Transfer Error: {e}", None
+    except Exception as e:
+        st.error(f"Unexpected Transfer Error: {e}", icon="🔥")
+        return f"[emotion: anxious] Unexpected error during transfer.", None
 
 def record_surgery_comment_tool(text: str):
-    if not groq_llm: return "[emotion: anxious] LLM client not initialized.", None
     st.info("Running: Record Surgery Comment Tool")
     try:
         structured_llm = groq_llm.with_structured_output(CommentInfo)
         prompt = f"Extract the patient ID (integer), doctor name (string), and the full comment (string) from this text. The comment is everything *after* the initial metadata (like ID and doctor name). Text: \"{text}\""
-        info = structured_llm.invoke(prompt)
+        info = _safe_llm_extract(structured_llm, prompt, CommentInfo)
 
         pid_str = str(info.pid); doctor = info.doctor; comment = info.comment
         timestamp = datetime.now().isoformat()
@@ -467,36 +534,47 @@ def record_surgery_comment_tool(text: str):
         conn.close()
 
         return f"[emotion: calm] Success. Surgery comment for patient {pid_str} by {doctor} has been saved.", None
-    except Exception as e:
+    except (ValueError, ConnectionError, sqlite3.Error) as e:
         st.error(f"Surgery Comment Error details: {e}")
-        return f"[emotion: anxious] Surgery Comment Error: Could not process request. Details: {e}", None
+        return f"[emotion: anxious] Surgery Comment Error: {e}", None
+    except Exception as e:
+        st.error(f"Unexpected Surgery Comment Error: {e}", icon="🔥")
+        return f"[emotion: anxious] Unexpected error recording comment.", None
+
 
 def answer_general_query_tool(text: str):
-    if not groq_llm: return "[emotion: anxious] LLM client not initialized.", None
+    """Handles general queries, using LLM for PID extraction."""
     st.info("Running: General Query Tool")
+    pid = None
+    context = ""
     try:
-        pid = find_patient_id(text) # Uses simple regex for query ID finding
-        context = "" # Initialize context
+        structured_llm = groq_llm.with_structured_output(PatientIDInfo)
+        prompt = f"Extract the patient ID as an integer from this query, return null if no ID is mentioned: \"{text}\""
+        info = _safe_llm_extract(structured_llm, prompt, PatientIDInfo)
+        pid = info.pid
 
-        if not pid:
-            # Check for general queries first
-            general_query_keywords = ["how many", "available", "list all", "who is in", "empty beds", "occupied rooms"]
+        if pid:
+            st.info(f"LLM Found Patient ID: {pid}. Fetching data...")
+            context = get_context_from_dbs(pid)
+        else:
+            general_query_keywords = ["how many", "available", "list all", "who is in", "empty beds", "occupied rooms", "status of rooms"]
             if any(word in text.lower() for word in general_query_keywords):
                  st.info("General hospital query detected (no specific patient ID).")
-                 # Load current room and patient data for context
                  rooms_df = get_room_status_dashboard()
                  patients_df = get_patient_dashboard()
-                 context = f"Current Room Status:\n{rooms_df.to_string(index=False)}\n\nCurrent Patients:\n{patients_df.to_string(index=False)}"
+                 context_parts = []
+                 if not rooms_df.empty:
+                     context_parts.append(f"Current Room Status:\n{rooms_df.to_string(index=False)}")
+                 if not patients_df.empty:
+                      context_parts.append(f"Current Patients:\n{patients_df.to_string(index=False)}")
+                 context = "\n\n".join(context_parts) if context_parts else "No room or patient data currently available."
             else:
-                 # If not a general query and no PID, ask for clarification
-                 return "[emotion: anxious] I'm sorry, I couldn't find a patient ID in your question. Please include the ID (e.g., 101) or ask a general question (e.g., 'How many beds are free?').", None
-        else:
-            st.info(f"Found Patient ID: {pid}. Fetching data from all sources...")
-            context = get_context_from_dbs(pid) # Get context for the specific patient
+                 return "[emotion: anxious] I'm sorry, I couldn't find a specific patient ID in your question. Please include the ID (e.g., 101) or ask a general question (e.g., 'How many beds are free?').", None
 
+        # --- LLM Synthesis ---
         prompt = f"""
         You are a helpful medical assistant. Answer the user's question based *only* on the provided context.
-        Be concise and accurate. If the context includes surgery comments, summarize the latest one briefly unless asked otherwise.
+        Be concise and accurate. If the context includes patient-specific surgery comments, summarize the latest one briefly unless asked otherwise.
         If asked a general question (like 'how many beds available'), calculate the answer from the provided context table(s).
 
         Context:
@@ -510,20 +588,24 @@ def answer_general_query_tool(text: str):
         response = groq_llm.invoke(prompt)
         answer = response.content.strip()
 
+        # --- Transcript Extraction ---
         raw_transcript = None
-        # Extract transcript only if a specific patient context was loaded and valid
         if pid:
             try:
-                # Safely parse context and access transcript
-                context_data = json.loads(context) if isinstance(context, str) else context
-                comments = context_data.get('surgery_comments')
-                if isinstance(comments, list) and len(comments) > 0:
-                     raw_transcript = comments[0].get('comment')
+                # Safely parse context only if it's likely valid JSON
+                if isinstance(context, str) and context.strip().startswith('{'):
+                    context_data = json.loads(context)
+                    comments = context_data.get('surgery_comments')
+                    if isinstance(comments, list) and len(comments) > 0:
+                         raw_transcript = comments[0].get('comment')
+                elif isinstance(context, dict):
+                    comments = context.get('surgery_comments')
+                    if isinstance(comments, list) and len(comments) > 0:
+                         raw_transcript = comments[0].get('comment')
             except Exception as e:
-                 st.warning(f"Could not parse context or extract transcript: {e}")
+                 st.warning(f"Could not extract transcript from context: {e}")
 
-
-        # Ensure emotion tag exists, inferring if necessary
+        # --- Emotion Tag Fallback ---
         if not re.match(r"\[emotion: \w+\]", answer):
             if "error" in answer.lower() or "not found" in answer.lower() or "unable" in answer.lower():
                  answer = f"[emotion: anxious] {answer}"
@@ -531,9 +613,12 @@ def answer_general_query_tool(text: str):
                  answer = f"[emotion: calm] {answer}"
 
         return answer, raw_transcript
+    except (ValueError, ConnectionError) as e:
+         st.error(f"Query Error details: {e}")
+         return f"[emotion: anxious] Query Error: {e}", None
     except Exception as e:
-        st.error(f"Query Error details: {e}")
-        return f"[emotion: anxious] Query Error: Could not process request. Details: {e}", None
+        st.error(f"Unexpected Query Error: {e}", icon="🔥")
+        return f"[emotion: anxious] Unexpected error during query processing.", None
 
 
 # ---
@@ -556,16 +641,22 @@ def run_management_agent(text_query):
         st.info(f"Intent classified as: **{intent}**")
 
         if intent == "admit": return admit_patient_tool(text_query)
-        elif intent == "discharge": return discharge_patient_tool(text_query) # Calls updated tool
-        elif intent == "transfer": return transfer_patient_tool(text_query) # Calls updated tool
+        elif intent == "discharge": return discharge_patient_tool(text_query)
+        elif intent == "transfer": return transfer_patient_tool(text_query)
         elif intent == "query": return answer_general_query_tool(text_query)
         else:
-            pid = find_patient_id(text_query)
-            if pid:
-                 st.warning("Could not classify intent clearly, defaulting to query.")
-                 return answer_general_query_tool(text_query)
-            else:
-                 return f"[emotion: anxious] I'm sorry, I can only admit, discharge, transfer, or query patients on this page. Please state your command clearly or include a patient ID.", None
+            # Fallback: Try extracting PID with LLM
+            try:
+                pid_info = _safe_llm_extract(groq_llm.with_structured_output(PatientIDInfo),
+                                             f"Extract patient ID if mentioned: \"{text_query}\"",
+                                             PatientIDInfo)
+                if pid_info and pid_info.pid:
+                    st.warning("Could not classify intent clearly, defaulting to query based on PID.")
+                    return answer_general_query_tool(text_query)
+                else:
+                    return f"[emotion: anxious] I'm sorry, I can only admit, discharge, transfer, or query patients. Please state your command clearly or include a patient ID.", None
+            except (ValueError, ConnectionError):
+                 return "[emotion: anxious] I'm sorry, I couldn't understand that request clearly.", None
     except Exception as e:
         st.error(f"Error in management agent: {e}")
         return f"[emotion: anxious] Error classifying intent: {e}", None
@@ -583,28 +674,43 @@ def run_query_agent(text_query):
 # ---
 # 7. SHARED STREAMLIT UI COMPONENTS
 # ---
-# (Keep draw_chat_history, draw_sidebar, handle_audio_processing as they were,
-#  but ensure handle_audio_processing does NOT have st.rerun() at the end)
+
 def draw_chat_history(page_key=""):
-    """Draws the main chat history container, using a page-specific key."""
+    """Draws chat history. Displays st.audio if audio_bytes exist."""
     chat_key = f'chat_history_{page_key}'
     if chat_key not in st.session_state: st.session_state[chat_key] = []
 
-    # Using st.container allows better control if needed, but direct drawing works
-    # chat_container = st.container(height=500)
-    # with chat_container:
-    for message in st.session_state[chat_key]: # Iterate directly over the list
+    # Display messages one by one
+    for i, message in enumerate(st.session_state[chat_key]): # Use enumerate for unique keys
         with st.chat_message(message["role"], avatar=message.get("avatar")):
             st.write(message["content"])
-            # Check if transcript exists and is not None/empty before showing button
+            
+            # Check if the audio_bytes key exists *at all*
+            if "audio_bytes" in message:
+                audio_data = message.get("audio_bytes")
+                
+                # Check if audio_data is not None AND not empty
+                if audio_data and len(audio_data) > 0:
+                    try:
+                        st.audio(audio_data, format='audio/wav', start_time=0)
+                    except Exception as e:
+                        st.error(f"Error displaying audio player: {e}")
+                
+                # NOTE: The warning for missing audio is now handled by
+                # handle_audio_processing, which adds the error to the
+                # message content. No need for an 'else' block here.
+
+            # Display the playback button if this message had a transcript
             if message.get("transcript"):
-                button_key = f"play_{message['timestamp']}_{page_key}"
+                button_key = f"play_{message.get('timestamp', i)}_{page_key}" # Unique key
                 if st.button(f"▶️ Playback Surgery Audio", key=button_key):
                     with st.spinner("Generating multi-speaker playback..."):
                         playback_audio = call_higgs_playback(message["transcript"])
                         if playback_audio:
                             st.audio(playback_audio, autoplay=True)
-
+                        else:
+                            st.error("Failed to generate playback audio.")
+                    # No rerun needed here
 
 def draw_sidebar(page_key=""):
     """Draws the shared sidebar elements, using page-specific keys for state."""
@@ -621,71 +727,79 @@ def draw_sidebar(page_key=""):
 
         st.header("Audio Input")
         st.write("Click to start, click again to stop.")
+        
+        # --- FIX: BRIGHTER MIC COLORS & REVERTED ICON ---
         audio_bytes = audio_recorder(
-            text="", recording_color="#e84040", neutral_color="#6aa36f",
-            icon_name="microphone", pause_threshold=300.0, key=f"recorder_{page_key}"
+            text="", 
+            recording_color="#FF4136",  # Bright Red
+            neutral_color="#00B74A",   # Bright Green
+            icon_name="microphone",     # Reverted to microphone
+            pause_threshold=300.0, 
+            key=f"recorder_{page_key}"
         )
     return audio_bytes, selected_lang_code
 
+
 def handle_audio_processing(agent_runner, audio_bytes, selected_lang_code, page_key=""):
-    """Core logic loop, using page-specific chat history key."""
+    """Core logic loop: Adds text & audio bytes to history. DOES NOT RERUN."""
     chat_key = f'chat_history_{page_key}'
     if chat_key not in st.session_state: st.session_state[chat_key] = []
-
-    # Display user audio (but don't save to history)
-    with st.chat_message("user", avatar="🧑‍⚕️"):
-        st.audio(audio_bytes, format="audio/wav")
 
     # Transcribe
     text_query = call_higgs_stt(audio_bytes, selected_lang_code)
 
     if text_query:
-        # Add transcribed text to history and display it
-        timestamp = datetime.now().isoformat()
-        user_message = {"role": "Doctor (transcribed)", "content": text_query, "avatar": "🧑‍⚕️", "timestamp": timestamp}
+        # Add transcribed text AND audio to history
+        timestamp_user = datetime.now().isoformat()
+        
+        # --- FIX: Role changed to "user" for CSS styling ---
+        user_message = {
+            "role": "user", 
+            "content": text_query, 
+            "avatar": "🧑‍⚕️", 
+            "timestamp": timestamp_user,
+            "audio_bytes": audio_bytes 
+        }
         st.session_state[chat_key].append(user_message)
-        with st.chat_message(user_message["role"], avatar=user_message.get("avatar")):
-            st.write(user_message["content"])
 
         # Run the appropriate agent logic
         with st.spinner("Thinking..."):
-            answer_with_emotion, raw_transcript = agent_runner(text_query) # This calls the specific tool
+            result = agent_runner(text_query)
+            if isinstance(result, tuple) and len(result) == 2:
+                answer_with_emotion, raw_transcript = result
+            else:
+                answer_with_emotion = result if isinstance(result, str) else "[emotion: anxious] Agent returned unexpected result."
+                raw_transcript = None
+                st.error(f"Agent function {agent_runner.__name__} did not return expected tuple.")
 
         # Process the agent's response
         if answer_with_emotion:
-            # Generate speech (TTS)
-            audio_response = call_higgs_tts(answer_with_emotion, selected_lang_code)
-
-            # Clean the answer for display
+            # Clean the answer for display and history
             clean_answer = re.sub(r'\[emotion: \w+\]', '', answer_with_emotion).strip()
-            timestamp = datetime.now().isoformat()
+            timestamp_assistant = datetime.now().isoformat() 
+
+            # --- Generate speech ---
+            tts_result = call_higgs_tts(answer_with_emotion, selected_lang_code)
+
+            # --- *** START NEW ERROR HANDLING *** ---
+            audio_response_bytes = None
+            if isinstance(tts_result, bytes):
+                audio_response_bytes = tts_result
+            elif isinstance(tts_result, str) and tts_result.startswith("TTS_ERROR:"):
+                # If it's our error string, add it to the chat bubble
+                clean_answer += f"\n\n**AUDIO FAILED:** {tts_result}"
+                print(f"DEBUG: {tts_result}") # Also print to terminal
+            # --- *** END NEW ERROR HANDLING *** ---
+
+            # --- Store audio bytes directly in the message dict ---
             assistant_message = {
                 "role": "assistant", "content": clean_answer, "avatar": "🤖",
-                "transcript": raw_transcript, "timestamp": timestamp
+                "transcript": raw_transcript, "timestamp": timestamp_assistant,
+                "audio_bytes": audio_response_bytes # This will be None if TTS failed
             }
+
+            # Add the complete message (text + audio bytes) to history
             st.session_state[chat_key].append(assistant_message)
 
-            # Display the assistant's response and potentially the playback button
-            # This needs to happen *outside* the initial transcription display block
-            # Rerunning will handle drawing the new message from session state
-            # but we need to ensure the audio plays *before* the rerun
-            if audio_response:
-                 st.session_state[f'autoplay_{timestamp}'] = audio_response # Store audio bytes for autoplay after rerun
-
-            # Use st.rerun() to redraw the chat including the new message
-            # and trigger autoplay if needed
-            # st.rerun()
-
-# Add a check at the top of app.py and page scripts for autoplay:
-def check_autoplay():
-    """Checks session state for audio to autoplay and plays it."""
-    played_keys = []
-    for key, audio_bytes in st.session_state.items():
-        if key.startswith('autoplay_'):
-            st.audio(audio_bytes, autoplay=True)
-            played_keys.append(key)
-    # Clean up played audio keys
-    for key in played_keys:
-        del st.session_state[key]
-
-# Call check_autoplay() at the beginning of app.py and page scripts, right after imports/config
+            # --- FIX: REMOVED st.rerun() ---
+            # The page script must handle the rerun
